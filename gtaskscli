@@ -1,0 +1,327 @@
+#!/bin/bash
+# Communicates with other scripts, bash and python alike, to manipulate the user's task list.
+
+working_dir="."
+usr_dir="$HOME/.gtaskscli"
+[ -x /usr/bin/python3 ] || exit 1
+[ -x /usr/bin/curl ] || exit 1
+[ -x /usr/bin/getopt ] || exit 1
+[ -x /bin/date ] || exit 1
+[ -x /bin/sed ] || exit 1
+[ -x $working_dir/googleToken ] || exit 1
+[ -a $working_dir/utils/auth_wserver.py ] || exit 1
+[ -a $working_dir/utils/getFreePort.py ] || exit 1
+[ -a $working_dir/utils/rfc7636.py ] || exit 1
+[ -a $working_dir/access_refresh_token.py ] || exit 1
+[ -a $working_dir/tasklist/list.py ] || exit 1
+[ -a $working_dir/task/tasks.py ] || exit 1
+[ -a $working_dir/task/task.py ] || exit 1
+
+# Check if the .gtaskscli file exist. If not, this is the first run.
+if ! [ -a $usr_dir ]; then
+	echo "It seems that you are new here. Let's set things up."
+	echo "Please read README.md to find out how to obtain the following necessary parameters."
+	echo -n "Google Client ID: "
+	read google_client_id
+	echo -n "Google Client Secret: "
+	read google_client_secret
+
+	# Write inputs into the file
+	echo "google_client_id=$google_client_id" >> $usr_dir
+	echo "google_client_secret=$google_client_secret" >> $usr_dir
+
+	# Call the GoogleToken script
+	export google_client_id
+	export google_client_secret
+	export google_scope="https://www.googleapis.com/auth/tasks"
+
+	$working_dir/googleToken
+
+	if [ $? -eq 1 ]; then
+		echo "Missing dependencies. Please contact the developer."
+		exit $?
+	fi
+
+	if [ $? -eq 2 ]; then
+		echo "Code verification and code challenge generation failed. Please contact the developer."
+		exit $?
+	fi
+
+	if [ $? -eq 3 ]; then
+		echo "Free port unavailable. Please wait for a moment, or contact the developer if the problem persists."
+		exit $?
+	fi
+fi
+
+# Read from .gtaskscli to setup variables required for operations
+while IFS='' read -r line || [[ -n "$line" ]]; do
+	PARAM=$( echo -n $line | sed "s/=.*//" )
+
+	case $PARAM in
+	"google_client_id")
+		export google_client_id=${line#"$PARAM="}
+		;;
+	"google_client_secret")
+		export google_client_secret=${line#"$PARAM="}
+		;;
+	"access_token")
+		export access_token=${line#"$PARAM="}
+		;;
+	"refresh_token")
+		export refresh_token=${line#"$PARAM="}
+		;;
+	"expires_at")
+		export expires_at=${line#"$PARAM="}
+	esac
+done < "$usr_dir"
+
+# Figure out if token has expired
+if [ "$expires_at" -lt "$(/bin/date -d "+1 minute" +%s)" ]; then
+	echo "Access token expired. Renewing..."
+	renewJson=$( curl -s -d "client_id=$google_client_id&client_secret=$google_client_secret&refresh_token=$refresh_token&grant_type=refresh_token" https://www.googleapis.com/oauth2/v4/token )
+	export access_token=$(echo -n $renewJson | python3 $working_dir/access_refresh_token.py a)
+	export expires_at=$(echo -n $renewJson | python3 $working_dir/access_refresh_token.py e)
+
+	# Save new data into the usr_dir file
+	rm -f $usr_dir
+	if [ $? -eq 2 ]; then
+		echo "Refresh token is no longer valid. Re-setup required."
+		echo "Please rerun this command."
+		exit $?
+	fi
+
+	echo "google_client_id=$google_client_id" >> $usr_dir
+	echo "google_client_secret=$google_client_secret" >> $usr_dir
+	echo "access_token=$access_token" >> $usr_dir
+	echo "refresh_token=$refresh_token" >> $usr_dir
+	echo "expires_at=$( /bin/date -d "+$expires_at seconds" +%s )" >> $usr_dir
+fi
+
+# Parse command line arguments
+OPTIND=1 # reset just in case getopts has been used previously in the shell
+
+! PARSED=$( /usr/bin/getopt --options=hls:d:yn:r:u:c --longoptions=help,list,select:,delete:,yes,new:,due:,notes:,rename:,update:complete --name "$0" -- "$@" ) 
+if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+	echo "Error occured while parsing command line arguments."
+	exit 5
+fi
+
+## Set the positional arguments again, I want the '--' to be there
+eval set -- "$PARSED"
+
+list=n select=n delete=n comp=n yes=0 new="" due="" notes="" name="" update="" 
+while true; do
+	case "$1" in
+		-h|--help)
+			cat cmdHelp.txt
+			shift
+			;;
+		-l|--list)
+			list=y
+			shift
+			;;
+		-s|--select)
+			select=$2
+			shift 2
+			;;
+		-d|--delete)
+			delete=$2
+			shift 2	
+			;;
+		-y|--yes)
+			yes="Y"
+			shift
+			;;
+		-n|--new)
+			new=$2
+			shift 2
+			;;
+		-r|--rename)
+			name=$2
+			shift 2
+			;;
+		-u|--update)
+			update=$2
+			shift 2
+			;;	
+		-c|--complete)
+			comp="Y"
+			shift
+			;;
+		--due)
+			due=$2
+			shift 2
+			;;
+		--notes)
+			notes=$2
+			shift 2
+			;;
+		--)
+			shift
+			break
+			;;
+	esac
+done
+
+# Process commands
+if [ "$list" == "y" ]; then
+	if [ "$1" != "" ]; then
+		item_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py $@ )
+		if [[ ${PIPESTATUS[0]} -eq 3 ]]; then
+			echo "Could not find the list."
+			exit 6
+		fi
+		curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/lists/$item_id/tasks | python3 $working_dir/task/tasks.py
+	else
+		curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py
+	fi
+
+	exit 0 # all other operations cannot take place when listing
+fi
+
+if [ "$select" != "n" ]; then
+	if [ "$1" != "" ]; then
+		item_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py $@ )
+		if [[ ${PIPESTATUS[0]} -eq 3 ]]; then
+			echo "Could not find the list."
+			exit 6
+		fi
+		self_url=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/lists/$item_id/tasks | python3 $working_dir/task/tasks.py $select )
+		curl -s -H "Authorization: Bearer $access_token" $self_url | python3 $working_dir/task/task.py
+	else
+		echo "Please specify a list!"
+		exit 0
+	fi
+	
+fi
+
+if [ "$delete" != "n" ]; then
+    if [ "$1" != "" ]; then # delete item
+        item_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py $@ )
+        if [[ ${PIPESTATUS[0]} -eq 3 ]]; then
+            echo "Could not find the list."
+            exit 6
+        fi
+
+		# Display the task to delete
+		self_url=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/lists/$item_id/tasks | python3 $working_dir/task/tasks.py $delete )
+		curl -s -H "Authorization: Bearer $access_token" $self_url | python3 $working_dir/task/task.py
+
+		# Ask the user if they are sure
+		choice=$yes
+		while [ "$choice" != "Y" ] && [ $choice != "n" ]; do
+			echo -n "Are you sure you want to delete the above task? [Y/n]: "
+			read choice
+		done
+
+		# Deletes the task
+		if [ "$choice" == "Y" ]; then
+        	task_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/lists/$item_id/tasks | python3 $working_dir/task/tasks.py -$delete )
+        	curl -s -X DELETE -H "Authorization: Bearer $access_token" $self_url 
+		fi
+    else # delete list
+		item_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py $delete )
+		if [[ ${PIPESTATUS[0]} -eq 3 ]]; then
+			echo "Could not find the list."
+			exit 6
+		fi
+
+		# Prompt the user if they are sure
+		choice=$yes
+		while [ "$choice" != "Y" ] && [ $choice != "n" ]; do
+			echo -n "Are you sure you want to delete $delete? [Y/n]: "
+			read choice
+		done
+
+		# Deletes the task list
+		if [ "$choice" == "Y" ]; then
+			curl -s -X DELETE -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists/$item_id
+		fi
+    fi
+	exit 0
+fi
+
+if [ "$new" != "" ]; then
+	if [ "$1" != "" ]; then # user wants a new task
+		json="{\"kind\": \"tasks#task\", \"title\": \"$new\""
+
+		if [ "$due" != "" ]; then # add due date if applicable
+			json="$json,\"due\": \"$( date -u +%Y-%m-%dT00:00:00.000Z -d "$due" )\""
+		fi
+
+		if [ "$notes" != "" ]; then
+			json="$json,\"notes\": \"$notes\""
+		fi
+
+		json="$json}"
+
+		# Figure out ID of task list
+		item_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py $1 )
+
+		if [[ ${PIPESTATUS[0]} -eq 3 ]]; then
+			echo "Could not find the list."
+			exit 6
+		fi
+
+		# Create a new task on the task list
+		curl -s -X POST -H "Authorization: Bearer $access_token" -H "Content-Type: application/json" https://www.googleapis.com/tasks/v1/lists/$item_id/tasks -d "$json" >> /dev/null
+	else # user wants a new task list
+		json="{\"kind\": \"tasks#taskList\", \"title\": \"$new\"}"
+		curl -s -X POST -H "Authorization: Bearer $access_token" -H "Content-Type: application/json" https://www.googleapis.com/tasks/v1/users/@me/lists -d "$json" >> /dev/null
+	fi
+	exit 0
+fi
+
+if [ "$update" != "" ] && [[ "$name" != "" || "$due" != "" || "$notes" != "" || "$comp" == "Y" ]]; then
+	if [ "$1" != "" ]; then # user wants to modify task
+		json="{"
+		separator="" # I'm sorry I'm lazy to write if else everywhere to check if the json has started or not okay????
+
+		if [ "$name" != "" ]; then
+			json="$json$separator \"title\": \"$name\""
+			separator=","
+		fi
+
+		if [ "$due" != "" ]; then
+			json="$json$separator \"due\": \"$( date -u +%Y-%m-%dT00:00:00.000Z -d "$due" )\""
+			separator=","
+		fi
+
+		if [ "$notes" != "" ]; then
+			json="$json$separator \"notes\": \"$notes\""
+			separator=","
+		fi
+
+		if [ "$comp" == "Y" ]; then
+			json="$json$separator \"status\": \"completed\""
+			separator=","
+		fi
+
+		json="$json }"
+
+		# Obtain the item id
+		item_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py $@ ) 
+		if [[ ${PIPESTATUS[0]} -eq 3 ]]; then
+			echo "Could not find the list."
+			exit 6
+		fi
+		self_url=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/lists/$item_id/tasks | python3 $working_dir/task/tasks.py $update )
+		curl -s -X PATCH -H "Authorization: Bearer $access_token" -H "Content-Type: application/json" $self_url -d "$json" >> /dev/null
+		curl -s -X POST -H "Authorization: Bearer $access_token" "https://www.googleapis.com/tasks/v1/lists/$item_id/clear" >> /dev/null
+	else # user wants to modify tasklist
+		if [ "$name" != "" ]; then
+			json="{ \"title\": \"$name\" }"
+
+			# Obtain the item id
+			item_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py $update )
+			if [[ ${PIPESTATUS[0]} -eq 3 ]]; then
+				echo "Could not find the list."
+				exit 6
+			fi
+
+			# Rename the list
+			curl -s -X PATCH -H "Authorization: Bearer $access_token" -H "Content-Type: application/json" https://www.googleapis.com/tasks/v1/users/@me/lists/$item_id -d "$json" >> /dev/null	
+		fi	
+	fi
+	exit 0
+fi

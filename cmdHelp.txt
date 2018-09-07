@@ -1,0 +1,39 @@
+Usage: gtaskscli [OPTION]
+
+	-h, --help
+			Displays this help message
+	-l, --list
+			Lists all task lists
+	-d [tasklist], --delete=[tasklist]
+			Deletes specified tasklist, in name, on a first come first serve basis
+	-y, --yes
+			Says "Y" to every prompt automatically (Warning: Does not prompt at all)
+	-n [name], --new=[name]
+			Creates a new task list, with the provided name
+	-u [tasklist], --update=[tasklist]
+			Updates the tasklist, by name, on a first come first serve basis
+
+Usage: gtaskscli [tasklist] [OPTION]
+
+	-h, --help
+			Displays this help message
+	-l, --list
+			Lists all the tasks under tasklist
+	-s, --select
+			Selects a task, printing out its details
+	-d [ID], --delete=[ID]
+			Deletes specified task, as listed with the -l option
+	-y, --yes
+			Says "Y" to every prompt automatically
+	-n [name], --new=[name]
+			Creates a new task, with the provided name
+	--due=[date -d compatible string]
+			Sets a due date for a task (requires -n or -u)
+	--notes=[description]
+			Sets a note for a task (requires -n or -u)
+	-r [name], --rename=[name]
+			Renames a specified task (requires -u)
+	-u [ID], --update=[ID]
+			Updates a specified task with the -r, --notes, --due and -c parameters
+	-c, --complete
+			Marks a task as complete (requires -u)

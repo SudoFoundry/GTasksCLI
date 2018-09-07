@@ -1,0 +1,64 @@
+#!/bin/bash
+# Attempts to communicate with the Google Authentication Server to obtain a token. Requires Python 3.6
+
+working_dir="."
+usr_dir="$HOME/.gtaskscli"
+[ $google_client_id ] || exit 1 
+[ $google_client_secret ] || exit 1
+[ $google_scope ] || exit 1 # ensure that scope is escaped properly
+[ -x /usr/bin/python3 ] || exit 1
+[ -x /usr/bin/curl ] || exit 1
+[ -x /bin/date ] || exit 1
+[ -a $working_dir/utils/auth_wserver.py ] || exit 1
+[ -a $working_dir/utils/getFreePort.py ] || exit 1
+[ -a $working_dir/utils/rfc7636.py ] || exit 1
+[ -a $working_dir/access_refresh_token.py ] || exit 1
+
+auth_wserver="/usr/bin/python3 $working_dir/utils/auth_wserver.py"
+getFreePort="/usr/bin/python3 $working_dir/utils/getFreePort.py"
+pfce="/usr/bin/python3 $working_dir/utils/rfc7636.py"
+art="/usr/bin/python3 $working_dir/access_refresh_token.py"
+
+# Create code challenge (and verifier)
+code_verifier=$( $pfce cv )
+code_challenge=$( $pfce cc $code_verifier )
+
+if [ $? -ne 0 ]; then
+	exit 2 
+fi
+
+# Obtain port for local authentication webserver
+port=$( $getFreePort )
+
+if [ $? -ne 0 ]; then
+	exit 3
+fi
+
+# Request user to connect to Google OAuth 2.0 Server
+url="https://accounts.google.com/o/oauth2/v2/auth?client_id=$google_client_id&redirect_uri=http://127.0.0.1:$port&response_type=code&scope=https://www.googleapis.com/auth/tasks&code_challenge_method=S256&code_challenge=$code_challenge&access_type=offline" # undocumented: access_type=offline required for refresh token.
+
+if [ -x /usr/bin/xdg-open ]; then
+	while [ "$usr_response" != "Y" ] && [ "$usr_response" != "n" ]; do
+		echo -n "We need to authenticate you with Google. Open a browser tab for you? [Y/n]: "
+		read usr_response
+	done
+
+	if [ "$usr_response" == "Y" ]; then
+		xdg-open $url & # free the shell for other operations
+	else
+		echo "Please connect to: $url"
+	fi
+
+	# Launch the local authentication web server
+	authorization_code=$( $auth_wserver $port )
+fi
+
+exchange_json=$( /usr/bin/curl -s -d code="$authorization_code&client_id=$google_client_id&client_secret=$google_client_secret&redirect_uri=$url&grant_type=authorization_code&code_verifier=$code_verifier" https://www.googleapis.com/oauth2/v4/token )
+
+access_token=$( echo -n $exchange_json | $art a )
+refresh_token=$( echo -n $exchange_json | $art r )
+token_expires=$( echo -n $exchange_json | $art e )
+
+echo "access_token=$access_token" >> $usr_dir
+echo "refresh_token=$refresh_token" >> $usr_dir
+echo -n expires_at=$( date +%s -d "+$token_expires seconds" ) >> $usr_dir
