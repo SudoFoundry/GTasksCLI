@@ -256,7 +256,7 @@ if [ "$new" != "" ]; then
 		json="$json}"
 
 		# Figure out ID of task list
-		item_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py $1 )
+		item_id=$( curl -s -H "Authorization: Bearer $access_token" https://www.googleapis.com/tasks/v1/users/@me/lists | python3 $working_dir/tasklist/list.py $@ )
 
 		if [[ ${PIPESTATUS[0]} -eq 3 ]]; then
 			echo "Could not find the list."
